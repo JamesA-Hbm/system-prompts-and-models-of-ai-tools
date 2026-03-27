@@ -26,13 +26,16 @@ Start-Process "C:\Program Files\WindowsApps\Claude_1.1.9310.0_x64__pzs8sxrjxfijc
 
 > **Note:** The version number in the path (e.g., `1.1.9310.0`) changes with updates. Use the dynamic method below to avoid hardcoding it.
 
-### Universal Method (works for any installation)
+### Dynamic Method (works for any installation)
 
-Use `where.exe` to automatically find the executable regardless of install method:
+Automatically finds the executable regardless of install method or version:
 
 ```powershell
-Start-Process (where.exe Claude.exe)
+$exe = Get-ChildItem "C:\Program Files\WindowsApps\Claude*" -Recurse -Filter "claude.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+Start-Process $exe
 ```
+
+> **Note:** `where.exe Claude.exe` only works from elevated (Administrator) terminals for Microsoft Store apps. The `Get-ChildItem` method works from any terminal.
 
 ### Command Prompt (cmd)
 
@@ -44,9 +47,11 @@ start "" "%LOCALAPPDATA%\Programs\claude-desktop\Claude.exe"
 
 ### Finding Your Installation Path
 
-If the default paths don't work, find where Claude is installed:
-
 ```powershell
+# For Microsoft Store installations
+Get-ChildItem "C:\Program Files\WindowsApps\Claude*" -Recurse -Filter "claude.exe" -ErrorAction SilentlyContinue | Select-Object FullName
+
+# For standalone installations (also works from elevated terminals for Store apps)
 where.exe Claude.exe
 ```
 
@@ -64,7 +69,10 @@ On Windows, running the command multiple times will open additional instances. T
 Add this to your PowerShell profile (`$PROFILE`) for quick access:
 
 ```powershell
-function claude { Start-Process (where.exe Claude.exe) }
+function claude {
+    $exe = Get-ChildItem "C:\Program Files\WindowsApps\Claude*" -Recurse -Filter "claude.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+    if ($exe) { Start-Process $exe } else { Write-Error "Claude Desktop not found" }
+}
 ```
 
 Then simply run `claude` from any PowerShell terminal.
