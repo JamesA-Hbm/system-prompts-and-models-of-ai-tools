@@ -6,112 +6,119 @@ On macOS, you can open a new instance of Claude Desktop with:
 open -n /Applications/Claude.app
 ```
 
-## Windows Equivalents
+## Windows: Running Two Instances Side by Side
 
-The installation path depends on how Claude Desktop was installed:
+The solution uses `--user-data-dir` to bypass Electron's single-instance lock. Both instances share the same authentication by pointing to the original profile directory.
 
-### Standalone Installer (default path)
+### Setup (one time)
 
+Create three `.bat` files on your Desktop by running these commands in PowerShell:
+
+**Claude (1).bat** - First instance:
 ```powershell
-Start-Process "$env:LOCALAPPDATA\Programs\claude-desktop\Claude.exe"
+Set-Content "$env:USERPROFILE\Desktop\Claude (1).bat" @'
+@echo off
+for /f "delims=" %%i in ('powershell -NoProfile -Command "(Get-ChildItem 'C:\Program Files\WindowsApps\Claude*' -Recurse -Filter 'claude.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName"') do set CLAUDE=%%i
+start "" "%CLAUDE%" --user-data-dir=%APPDATA%\Claude
+'@
 ```
 
-### Microsoft Store Installation
-
-If installed from the Microsoft Store, the path is under `WindowsApps`. The version number changes with every update:
-
-```powershell
-# Find your current path
-Get-ChildItem "C:\Program Files\WindowsApps\Claude*" -Recurse -Filter "claude.exe" -ErrorAction SilentlyContinue | Select-Object FullName
-```
-
-### Launching via App ID (recommended for Store apps)
-
-```powershell
-explorer.exe shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude
-```
-
-> **Note:** `Start-Process` with the full WindowsApps path often fails with "Otro programa está utilizando este archivo" due to the `CoworkVMService` Windows service. Use `explorer.exe shell:AppsFolder\...` or launch from the Start Menu instead.
-
-### Finding Your App ID
-
-```powershell
-Get-StartApps | Where-Object { $_.Name -like '*Claude*' }
-```
-
-## Opening Multiple Instances
-
-Claude Desktop enforces a single-instance lock via Electron's `app.requestSingleInstanceLock()`. To open a **second independent instance**, use the `--user-data-dir` flag:
-
-```powershell
-Start-Process "C:\Program Files\WindowsApps\Claude_<VERSION>_x64__pzs8sxrjxfjjc\app\claude.exe" -ArgumentList "--user-data-dir=$env:LOCALAPPDATA\claude-instance-2"
-```
-
-### Important Notes on Authentication
-
-- Each `--user-data-dir` profile requires **its own authentication** (one time only).
-- Copying the profile from the main instance does NOT transfer the session because Electron/Chromium encrypts cookies and tokens using DPAPI, which binds the encryption to the specific profile path.
-- Using NTFS junctions (`mklink /J`) to the original profile fails because the single-instance lockfile blocks the second instance.
-- After authenticating once, the second instance remembers your session permanently.
-
-### Desktop Shortcut for Second Instance (auto-detects version)
-
-Create a `.bat` file that automatically finds the current Claude version:
-
+**Claude (2).bat** - Second instance (uses a copy of the profile):
 ```powershell
 Set-Content "$env:USERPROFILE\Desktop\Claude (2).bat" @'
 @echo off
 for /f "delims=" %%i in ('powershell -NoProfile -Command "(Get-ChildItem 'C:\Program Files\WindowsApps\Claude*' -Recurse -Filter 'claude.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName"') do set CLAUDE=%%i
-start "" "%CLAUDE%" --user-data-dir=%LOCALAPPDATA%\claude-instance-2
+start "" "%CLAUDE%" --user-data-dir=%APPDATA%\Claude2
 '@
 ```
 
-This shortcut survives Claude updates because it dynamically finds the executable path.
+**Fix Claude.bat** - Rescue script for when Claude gets stuck after updates (run as Administrator):
+```powershell
+Set-Content "$env:USERPROFILE\Desktop\Fix Claude.bat" @'
+@echo off
+echo Cerrando Claude y servicios...
+taskkill /F /IM "claude.exe" /T 2>nul
+taskkill /F /IM "cowork-svc.exe" /T 2>nul
+taskkill /F /IM "chrome-native-host.exe" /T 2>nul
+net stop CoworkVMService 2>nul
+timeout /t 5 /nobreak
+echo.
+echo Claude cerrado. Ahora abre Claude (1).bat y Claude (2).bat
+pause
+'@
+```
+
+Copy the profile for the second instance:
+```powershell
+robocopy "$env:APPDATA\Claude" "$env:APPDATA\Claude2" /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS
+```
+
+### Daily Usage
+
+1. Double-click **Claude (1).bat**
+2. Double-click **Claude (2).bat**
+3. Both instances open authenticated with your account
+
+### After a Claude Update
+
+If the `.bat` files show "Otro programa está utilizando este archivo":
+
+1. Right-click **Fix Claude.bat** > **Run as Administrator**
+2. Wait for "Claude cerrado"
+3. Double-click **Claude (1).bat**, then **Claude (2).bat**
+
+> **Note:** The `.bat` files auto-detect the Claude version path, so they survive updates without modification.
+
+### Why `.bat` Files Instead of the Start Menu
+
+- The Start Menu uses Electron's default launch which enforces single-instance lock
+- Using `--user-data-dir` explicitly bypasses the lock, allowing multiple instances
+- Both instances use the same `%APPDATA%\Claude` profile, so authentication is shared
+- The `.bat` files must be run from PowerShell (`& "path\to\file.bat"`) or from a non-admin terminal
+
+### Important: Profile Copying Limitations
+
+- Copying the profile to a **different path** (e.g., `%LOCALAPPDATA%\claude-instance-2`) does NOT transfer the session in newer versions of Claude Desktop
+- This is because Chromium's LevelDB databases (IndexedDB, Local Storage) get corrupted during copy and Electron deletes/recreates them
+- The DPAPI encryption key (`os_crypt.encrypted_key` in `Local State`) is identical across copies, but the database corruption causes auth loss
+- The solution is to use the **same original profile path** (`%APPDATA%\Claude`) for the first instance, and a robocopy mirror (`%APPDATA%\Claude2`) for the second
 
 ## CoworkVMService (Background Service)
 
-Claude Desktop registers a Windows service called `CoworkVMService` that starts automatically and can block the executable:
+Claude Desktop (Microsoft Store version) registers a Windows service called `CoworkVMService` that:
+- Starts automatically with Windows
+- Is managed by `services.exe` (PID 1220)
+- Can block the Claude executable after updates
+- Cannot be reconfigured via `sc.exe` (Access Denied) but can via registry:
 
 ```powershell
-# Check the service
-Get-WmiObject Win32_Service | Where-Object { $_.PathName -like '*cowork*' } | Select-Object Name, State, StartMode
+# Disable the service (value 4 = Disabled, 3 = Manual, 2 = Auto)
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\CoworkVMService" /v Start /t REG_DWORD /d 4 /f
 
-# Stop the service (requires Administrator)
-Stop-Service -Name "CoworkVMService" -Force
+# Re-enable after fixing
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\CoworkVMService" /v Start /t REG_DWORD /d 2 /f
 ```
 
-### Kill Everything (Nuclear Option)
-
-When Claude is stuck, won't open, or shows "Otro programa está utilizando este archivo":
+## Finding Your Installation
 
 ```powershell
-# Run in Administrator terminal
-taskkill /F /IM "claude.exe" /T; taskkill /F /IM "cowork-svc.exe" /T; taskkill /F /IM "chrome-native-host.exe" /T; Stop-Service -Name "CoworkVMService" -Force -ErrorAction SilentlyContinue; Start-Sleep 3; Get-Process | Where-Object { $_.Path -like '*Claude*' -or $_.Path -like '*cowork*' } | Stop-Process -Force -ErrorAction SilentlyContinue
-```
+# Microsoft Store installation path
+Get-ChildItem "C:\Program Files\WindowsApps\Claude*" -Recurse -Filter "claude.exe" -ErrorAction SilentlyContinue | Select-Object FullName
 
-Then reopen Claude from the Start Menu.
+# App ID for Store apps
+Get-StartApps | Where-Object { $_.Name -like '*Claude*' }
+
+# Standalone installer path
+"$env:LOCALAPPDATA\Programs\claude-desktop\Claude.exe"
+```
 
 ## Troubleshooting
 
-- **"Otro programa está utilizando este archivo"**: The `CoworkVMService` or a ghost Claude process is running. Use the "Kill Everything" command above, then reopen.
-- **"Unable to move the cache" / "Unable to create cache"**: Launched from an elevated (Administrator) terminal. Use a non-admin terminal or the Start Menu instead.
-- **Claude doesn't open after update**: The version number in the path changed. Use `Get-ChildItem` to find the new path, or use the `.bat` shortcut which auto-detects it.
-- **Blank window on second instance**: Corrupted profile data. Delete the profile directory and re-authenticate:
-  ```powershell
-  Remove-Item "$env:LOCALAPPDATA\claude-instance-2" -Recurse -Force
-  ```
-- **`where.exe Claude.exe` returns nothing**: Only works from elevated terminals for Store apps. Use `Get-ChildItem` instead.
-- **`CoworkVMService` keeps restarting**: It's registered as an Auto-start Windows service managed by `services.exe` (PID 1220). Stop it with `Stop-Service -Name "CoworkVMService" -Force` from an Admin terminal.
-
-## Optional: PowerShell Alias
-
-Add this to your PowerShell profile (`$PROFILE`) for quick access:
-
-```powershell
-function claude {
-    $exe = Get-ChildItem "C:\Program Files\WindowsApps\Claude*" -Recurse -Filter "claude.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-    if ($exe) { Start-Process $exe } else { Write-Error "Claude Desktop not found" }
-}
-```
-
-Then simply run `claude` from any PowerShell terminal.
+| Problem | Solution |
+|---------|----------|
+| "Otro programa está utilizando este archivo" | Run `Fix Claude.bat` as Admin, then reopen |
+| "Unable to create cache" errors | Don't launch from Admin terminal |
+| Claude won't open after update | Run `Fix Claude.bat` as Admin, may need reboot |
+| `.bat` files don't work on double-click | Run from PowerShell: `& "$env:USERPROFILE\Desktop\Claude (1).bat"` |
+| Second instance asks for authentication | Use `%APPDATA%\Claude2` with robocopy from original, not a different path |
+| `CoworkVMService` keeps restarting | Disable via registry (see above), reboot, then re-enable after opening Claude |
